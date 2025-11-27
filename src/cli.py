@@ -1,181 +1,174 @@
-"""
-cli.py
---------------------------------------------------------
-Main Click-based CLI interface.
-
-Responsibilities:
-- Start application loop
-- Login/logout
-- Display role-specific menus
-- Run the appropriate actions (CRUD operations)
-"""
-
-import click
+# src/cli.py
 from rich.console import Console
 from rich.table import Table
-
-from auth import login, is_authorized
-from persistence import (
-    load_data, save_data, FILES
-)
-from models import (
-    Admin, TrainerManager, FrontDesk,
-    Member, MembershipPlan, ClassSession, Booking
-)
+from .persistence import Persistence
+from .auth import AuthManager
+from .models import Admin, TrainerManager, FrontDesk, Member, ClassSession, Booking, MembershipPlan
+from .utils import parse_datetime
+from datetime import datetime
 
 console = Console()
+persistence = Persistence()
+auth = AuthManager(persistence)
 
+def pause():
+    input("\nPress Enter to continue...")
 
-# -----------------------------------------------------
-# LOGIN COMMAND
-# -----------------------------------------------------
-@click.command()
-def start():
-    """Launch the GYMTrack CLI system."""
+def print_header():
+    console.rule("[bold blue]POP-GYM Management System[/bold blue]")
 
-    console.rule("[bold green]GYMTrack Management System[/bold green]")
-
-    # --------------- LOGIN --------------------
+def main_menu():
     while True:
-        username = click.prompt("Enter username")
-        password = click.prompt("Enter password", hide_input=True)
-
-        user = login(username, password)
-
-        if user:
-            console.print(f"[bold green]Login successful![/] Welcome {user.username}")
+        print_header()
+        print("1) Login")
+        print("2) Create user (Admin only)")
+        print("3) Register member (FrontDesk)")
+        print("4) Create class (Trainer)")
+        print("5) Book class (FrontDesk)")
+        print("6) View members")
+        print("7) View classes")
+        print("8) Logout")
+        print("9) Exit")
+        choice = input("Choose: ").strip()
+        if choice == "1":
+            auth.login()
+            pause()
+        elif choice == "2":
+            create_user_flow()
+        elif choice == "3":
+            register_member_flow()
+        elif choice == "4":
+            create_class_flow()
+        elif choice == "5":
+            book_class_flow()
+        elif choice == "6":
+            view_members()
+            pause()
+        elif choice == "7":
+            view_classes()
+            pause()
+        elif choice == "8":
+            auth.logout()
+            pause()
+        elif choice == "9":
+            console.print("[bold green]Goodbye![/bold green]")
             break
         else:
-            console.print("[bold red]Invalid credentials. Try again.[/]")
+            print("Invalid choice.")
+            pause()
 
-    # ------------- APPLICATION LOOP -----------
-    while True:
-        console.rule(f"[blue]Dashboard – {user.role}[/blue]")
-
-        menu = user.display_menu()
-
-        # Print menu
-        table = Table(title=f"{user.role} Menu")
-        table.add_column("Option")
-        table.add_column("Description")
-
-        for key, label in menu.items():
-            table.add_row(key, label)
-        console.print(table)
-
-        choice = click.prompt("Choose an option")
-
-        if choice == "0":
-            console.print("[yellow]Logging out...[/]")
-            break
-
-        handle_menu_choice(choice, user)
-
-
-# -----------------------------------------------------
-# MENU HANDLER (Simple Demonstration Version)
-# -----------------------------------------------------
-def handle_menu_choice(choice: str, user):
-
-    # ---------------- ADMIN ACTIONS ----------------
-    if user.role == "Admin":
-        if choice == "1":
-            create_user()
-        elif choice == "2":
-            edit_user()
-        elif choice == "3":
-            delete_user()
-
-    # ------------- TRAINER ACTIONS ---------------
-    if user.role == "TrainerManager":
-        if choice == "1":
-            create_class()
-        # ... add the other Trainer functions
-
-    # ---------------- FRONT DESK ACTIONS ---------
-    if user.role == "FrontDesk":
-        if choice == "1":
-            register_member()
-        # ... add other FrontDesk functions
-
-
-# -----------------------------------------------------
-# ADMIN FUNCTIONS
-# -----------------------------------------------------
-def create_user():
-    """Admin creates a new user."""
-
-    users = load_data(FILES["users"])
-
-    username = click.prompt("New username")
-
-    if username in users:
-        console.print("[red]User already exists![/]")
+def create_user_flow():
+    if not auth.require_role("Admin"):
+        pause()
         return
-
-    password = click.prompt("Password", hide_input=True)
-
-    role = click.prompt("Role", type=click.Choice(["Admin", "TrainerManager", "FrontDesk"]))
-
-    # Create the correct subclass object
+    username = input("New username: ").strip()
+    role = input("Role (Admin/TrainerManager/FrontDesk): ").strip()
+    password = input("Password: ").strip()
     if role == "Admin":
-        obj = Admin(username, password)
+        user = Admin(username, password)
     elif role == "TrainerManager":
-        obj = TrainerManager(username, password)
+        user = TrainerManager(username, password)
+    elif role == "FrontDesk":
+        user = FrontDesk(username, password)
     else:
-        obj = FrontDesk(username, password)
+        print("Invalid role.")
+        pause()
+        return
+    persistence.save_user(user)
+    print(f"[+] Created user {username} ({role})")
+    pause()
 
-    users[username] = obj
-    save_data(users, FILES["users"])
+def register_member_flow():
+    if not auth.require_role("FrontDesk"):
+        pause()
+        return
+    members = persistence.get_all("members")
+    member_id = input("Member ID: ").strip()
+    name = input("Full name: ").strip()
+    plans = persistence.get_all("plans")
+    console.print("Available Plans:")
+    for pid, plan in plans.items():
+        console.print(f"- {pid}: {plan.name} (${plan.price}) {plan.duration_days}d")
+    plan_id = input("Plan ID: ").strip()
+    plan = plans.get(plan_id)
+    if not plan:
+        print("Plan not found.")
+        pause()
+        return
+    m = Member(member_id, name)
+    m.renew(plan, datetime.now())
+    members[member_id] = m
+    persistence.save_all("members", members)
+    print("[+] Member registered.")
+    pause()
 
-    console.print("[green]User created successfully![/]")
+def create_class_flow():
+    if not auth.require_role("TrainerManager"):
+        pause()
+        return
+    classes = persistence.get_all("classes")
+    class_id = input("Class ID: ").strip()
+    name = input("Class name: ").strip()
+    trainer = auth.current_user.username
+    capacity = int(input("Capacity: ").strip())
+    dt_str = input("DateTime (YYYY-MM-DD HH:MM): ").strip()
+    try:
+        dt = parse_datetime(dt_str)
+    except Exception:
+        print("Invalid datetime format.")
+        pause()
+        return
+    c = ClassSession(class_id, name, trainer, capacity, dt)
+    classes[class_id] = c
+    persistence.save_all("classes", classes)
+    print("[+] Class created.")
+    pause()
 
+def book_class_flow():
+    if not auth.require_role("FrontDesk"):
+        pause()
+        return
+    members = persistence.get_all("members")
+    classes = persistence.get_all("classes")
+    bookings = persistence.get_all("bookings")
+    member_id = input("Member ID: ").strip()
+    if member_id not in members:
+        print("Member not found.")
+        pause()
+        return
+    class_id = input("Class ID: ").strip()
+    c = classes.get(class_id)
+    if not c:
+        print("Class not found.")
+        pause()
+        return
+    try:
+        c.add_booking(member_id)
+    except Exception as e:
+        print(f"Error: {e}")
+        pause()
+        return
+    classes[class_id] = c
+    bid = f"B{len(bookings)+1}"
+    bookings[bid] = Booking(bid, member_id, class_id, attended=False)
+    persistence.save_all("classes", classes)
+    persistence.save_all("bookings", bookings)
+    print("[+] Booking created.")
+    pause()
 
-def edit_user():
-    console.print("[yellow]Edit User — Not implemented fully yet.[/]")
+def view_members():
+    members = persistence.get_all("members")
+    t = Table("Member ID", "Name", "Plan", "Status")
+    for m in members.values():
+        t.add_row(m.member_id, m.name, str(m.plan_id), m.status)
+    console.print(t)
 
+def view_classes():
+    classes = persistence.get_all("classes")
+    t = Table("Class ID", "Name", "Trainer", "DateTime", "Capacity", "Booked")
+    for c in classes.values():
+        t.add_row(c.class_id, c.name, c.trainer, str(c.date_time), str(c.capacity), str(len(c.booked_members)))
+    console.print(t)
 
-def delete_user():
-    console.print("[yellow]Delete User — Not implemented fully yet.[/]")
-
-
-# -----------------------------------------------------
-# FRONT DESK
-# -----------------------------------------------------
-def register_member():
-    """Register a new gym member."""
-
-    members = load_data(FILES["members"])
-
-    m_id = click.prompt("Member ID")
-    name = click.prompt("Member Name")
-    plan_id = click.prompt("Plan ID")
-
-    member = Member(m_id, name, plan_id)
-
-    members[m_id] = member
-    save_data(members, FILES["members"])
-
-    console.print("[green]Member registered successfully![/]")
-
-
-# -----------------------------------------------------
-# TRAINER
-# -----------------------------------------------------
-def create_class():
-    """Create a new class session (trainer only)."""
-
-    classes = load_data(FILES["classes"])
-
-    class_id = click.prompt("Class ID")
-    name = click.prompt("Class Name")
-    trainer = click.prompt("Trainer Name")
-    capacity = click.prompt("Capacity", type=int)
-    date_time = click.prompt("DateTime (YYYY-MM-DD HH:MM)")
-
-    class_obj = ClassSession(class_id, name, trainer, capacity, date_time)
-
-    classes[class_id] = class_obj
-    save_data(classes, FILES["classes"])
-
-    console.print("[green]Class created successfully![/]")
+if __name__ == "__main__":
+    main_menu()
